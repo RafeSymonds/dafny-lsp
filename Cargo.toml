@@ -1,0 +1,26 @@
+[package]
+name = "dafny-lsp"
+version = "0.1.0"
+edition = "2021"
+description = "Language server for Dafny built on tree-sitter and the dafny CLI"
+license = "MIT"
+
+[[bin]]
+name = "dafny-lsp"
+path = "src/main.rs"
+
+[dependencies]
+tower-lsp = "0.20"
+tokio = { version = "1", features = ["full"] }
+tree-sitter = "0.25"
+tree-sitter-dafny = "0.1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+toml = "0.8"
+globset = "0.4"
+ignore = "0.4"
+
+[profile.release]
+opt-level = 3
+lto = "thin"
+strip = true

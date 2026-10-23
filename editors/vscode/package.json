@@ -1,0 +1,154 @@
+{
+  "name": "dafny-lsp",
+  "displayName": "Dafny (dafny-lsp)",
+  "description": "Dafny support backed by dafny-lsp: diagnostics and verification from the dafny CLI, plus completion, navigation and hover.",
+  "version": "0.1.0",
+  "publisher": "rafesymonds",
+  "author": "Rafe Symonds",
+  "license": "MIT",
+  "engines": {
+    "vscode": "^1.82.0"
+  },
+  "categories": [
+    "Programming Languages"
+  ],
+  "main": "./out/extension.js",
+  "activationEvents": [],
+  "contributes": {
+    "languages": [
+      {
+        "id": "dafny",
+        "aliases": [
+          "Dafny",
+          "dafny"
+        ],
+        "extensions": [
+          ".dfy",
+          ".dfyi"
+        ],
+        "configuration": "./language-configuration.json"
+      }
+    ],
+    "grammars": [
+      {
+        "language": "dafny",
+        "scopeName": "source.dafny",
+        "path": "./syntaxes/dafny.tmLanguage.json"
+      }
+    ],
+    "commands": [
+      {
+        "command": "dafny-lsp.verifyFile",
+        "title": "Verify File",
+        "category": "Dafny"
+      },
+      {
+        "command": "dafny-lsp.verifyCursor",
+        "title": "Verify Declaration at Cursor",
+        "category": "Dafny"
+      },
+      {
+        "command": "dafny-lsp.cancelVerification",
+        "title": "Cancel Verification",
+        "category": "Dafny"
+      },
+      {
+        "command": "dafny-lsp.restart",
+        "title": "Restart Language Server",
+        "category": "Dafny"
+      }
+    ],
+    "menus": {
+      "commandPalette": [
+        {
+          "command": "dafny-lsp.verifyFile",
+          "when": "editorLangId == dafny"
+        },
+        {
+          "command": "dafny-lsp.verifyCursor",
+          "when": "editorLangId == dafny"
+        },
+        {
+          "command": "dafny-lsp.cancelVerification",
+          "when": "editorLangId == dafny"
+        }
+      ]
+    },
+    "configuration": {
+      "title": "Dafny (dafny-lsp)",
+      "properties": {
+        "dafny-lsp.serverPath": {
+          "type": "string",
+          "default": "",
+          "description": "Path to the dafny-lsp executable. When empty, the binary bundled with the extension is used, then ~/.cargo/bin/dafny-lsp, then dafny-lsp on PATH."
+        },
+        "dafny-lsp.dafnyPath": {
+          "type": "string",
+          "default": "dafny",
+          "description": "Path to the dafny executable used for diagnostics and verification."
+        },
+        "dafny-lsp.verifyOn": {
+          "type": "string",
+          "enum": [
+            "change",
+            "save",
+            "never"
+          ],
+          "enumDescriptions": [
+            "Verify after each edit (debounced).",
+            "Type check after each edit, verify when the file is opened or saved.",
+            "Type check only. Verify with the Dafny: Verify commands."
+          ],
+          "default": "save",
+          "description": "When to run the verifier."
+        },
+        "dafny-lsp.debounceMs": {
+          "type": "number",
+          "default": 300,
+          "description": "Delay after the last edit before dafny runs."
+        },
+        "dafny-lsp.verificationTimeLimit": {
+          "type": [
+            "number",
+            "null"
+          ],
+          "default": null,
+          "description": "Seconds per assertion batch (--verification-time-limit). Null uses dafny's default."
+        },
+        "dafny-lsp.cores": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "default": null,
+          "description": "Number of cores or a percentage such as \"50%\" (--cores). Null uses dafny's default."
+        },
+        "dafny-lsp.extraArgs": {
+          "type": "array",
+          "items": {
+            "type": "string"
+          },
+          "default": [],
+          "description": "Extra arguments passed to every dafny run."
+        }
+      }
+    }
+  },
+  "scripts": {
+    "build": "esbuild src/extension.ts --bundle --platform=node --format=cjs --external:vscode --outfile=out/extension.js",
+    "check": "tsc --noEmit",
+    "test": "npm run build && node test/run.js",
+    "package": "npm run build && vsce package --allow-missing-repository --skip-license -o dafny-lsp.vsix"
+  },
+  "dependencies": {
+    "vscode-languageclient": "^9.0.1"
+  },
+  "devDependencies": {
+    "@types/node": "^20.11.0",
+    "@types/vscode": "^1.82.0",
+    "@vscode/test-electron": "^2.4.1",
+    "@vscode/vsce": "^3.2.1",
+    "esbuild": "^0.24.0",
+    "typescript": "^5.6.0"
+  }
+}

@@ -1,0 +1,146 @@
+{
+  "$schema": "https://raw.githubusercontent.com/martinring/tmlanguage/master/tmlanguage.json",
+  "name": "Dafny",
+  "scopeName": "source.dafny",
+  "patterns": [
+    { "include": "#comments" },
+    { "include": "#attributes" },
+    { "include": "#strings" },
+    { "include": "#declarations" },
+    { "include": "#keywords" },
+    { "include": "#types" },
+    { "include": "#constants" },
+    { "include": "#numbers" },
+    { "include": "#operators" },
+    { "include": "#calls" }
+  ],
+  "repository": {
+    "comments": {
+      "patterns": [
+        { "name": "comment.line.double-slash.dafny", "match": "//.*$" },
+        { "include": "#block-comment" }
+      ]
+    },
+    "block-comment": {
+      "name": "comment.block.dafny",
+      "begin": "/\\*",
+      "end": "\\*/",
+      "patterns": [{ "include": "#block-comment" }]
+    },
+    "attributes": {
+      "patterns": [
+        {
+          "name": "meta.attribute.dafny",
+          "begin": "\\{:",
+          "beginCaptures": { "0": { "name": "punctuation.definition.attribute.dafny" } },
+          "end": "\\}",
+          "endCaptures": { "0": { "name": "punctuation.definition.attribute.dafny" } },
+          "patterns": [
+            { "match": "\\G\\s*([A-Za-z_][A-Za-z0-9_]*)", "captures": { "1": { "name": "entity.other.attribute-name.dafny" } } },
+            { "include": "$self" }
+          ]
+        },
+        {
+          "match": "(@)([A-Za-z_][A-Za-z0-9_]*)",
+          "captures": {
+            "1": { "name": "punctuation.definition.attribute.dafny" },
+            "2": { "name": "entity.other.attribute-name.dafny" }
+          }
+        }
+      ]
+    },
+    "strings": {
+      "patterns": [
+        {
+          "name": "string.quoted.double.verbatim.dafny",
+          "begin": "@\"",
+          "end": "\"(?!\")",
+          "patterns": [{ "name": "constant.character.escape.dafny", "match": "\"\"" }]
+        },
+        {
+          "name": "string.quoted.double.dafny",
+          "begin": "\"",
+          "end": "\"",
+          "patterns": [{ "name": "constant.character.escape.dafny", "match": "\\\\(U\\{[0-9a-fA-F]+\\}|u[0-9a-fA-F]{4}|.)" }]
+        },
+        {
+          "name": "string.quoted.single.dafny",
+          "match": "'(\\\\(U\\{[0-9a-fA-F]+\\}|u[0-9a-fA-F]{4}|.)|[^'\\\\])'"
+        }
+      ]
+    },
+    "declarations": {
+      "patterns": [
+        {
+          "match": "\\b(method|lemma|function|predicate|constructor|iterator)\\b(\\s+method\\b)?((?:\\s*\\{:[^}]*\\})*)\\s+([A-Za-z_][A-Za-z0-9_?']*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.function.dafny" },
+            "2": { "name": "keyword.declaration.function.dafny" },
+            "3": { "patterns": [{ "include": "#attributes" }] },
+            "4": { "name": "entity.name.function.dafny" }
+          }
+        },
+        {
+          "match": "\\b(class|trait|datatype|codatatype|newtype|type|module)\\b((?:\\s*\\{:[^}]*\\})*)\\s+([A-Za-z_][A-Za-z0-9_?'.]*)",
+          "captures": {
+            "1": { "name": "keyword.declaration.type.dafny" },
+            "2": { "patterns": [{ "include": "#attributes" }] },
+            "3": { "name": "entity.name.type.dafny" }
+          }
+        }
+      ]
+    },
+    "keywords": {
+      "patterns": [
+        {
+          "name": "keyword.control.dafny",
+          "match": "\\b(if|then|else|match|case|while|for|to|downto|break|continue|return|yield|label|by)\\b"
+        },
+        {
+          "name": "keyword.other.verification.dafny",
+          "match": "\\b(requires|ensures|modifies|reads|decreases|invariant|witness|assert|assume|expect|reveal|hide|calc|forall|exists|old|fresh|unchanged|allocated|modify)\\b"
+        },
+        {
+          "name": "keyword.declaration.dafny",
+          "match": "\\b(method|lemma|function|predicate|constructor|iterator|class|trait|datatype|codatatype|newtype|type|module|import|opened|export|provides|reveals|extends|refines|replaces|include|var|const|returns|yields)\\b"
+        },
+        {
+          "name": "storage.modifier.dafny",
+          "match": "\\b(ghost|static|abstract|opaque|twostate|least|greatest|inductive|nameonly|replaceable|older)\\b"
+        },
+        {
+          "name": "keyword.other.dafny",
+          "match": "\\b(new|print|is|as|in)\\b"
+        }
+      ]
+    },
+    "types": {
+      "name": "support.type.builtin.dafny",
+      "match": "\\b(int|nat|real|bool|char|string|seq|set|iset|multiset|map|imap|object\\??|ORDINAL|array[0-9]*\\??|bv[0-9]+|fp32|fp64)\\b"
+    },
+    "constants": {
+      "patterns": [
+        { "name": "constant.language.dafny", "match": "\\b(true|false|null)\\b" },
+        { "name": "variable.language.this.dafny", "match": "\\bthis\\b" }
+      ]
+    },
+    "numbers": {
+      "patterns": [
+        { "name": "constant.numeric.hex.dafny", "match": "\\b0x[0-9a-fA-F](_?[0-9a-fA-F])*\\b" },
+        { "name": "constant.numeric.decimal.dafny", "match": "\\b[0-9](_?[0-9])*(\\.[0-9](_?[0-9])*)?(e[+-]?[0-9]+)?\\b" }
+      ]
+    },
+    "operators": {
+      "patterns": [
+        { "name": "keyword.operator.logical.dafny", "match": "<==>|==>|<==|&&|\\|\\||!(?!in\\b)" },
+        { "name": "keyword.operator.assignment.dafny", "match": ":=|:\\||:-" },
+        { "name": "keyword.operator.comparison.dafny", "match": "==|!=|<=|>=|!!|<|>" },
+        { "name": "keyword.operator.arithmetic.dafny", "match": "[-+*/%]" }
+      ]
+    },
+    "calls": {
+      "match": "\\b([A-Za-z_][A-Za-z0-9_?']*)\\s*(?=\\()",
+      "captures": { "1": { "name": "entity.name.function.call.dafny" } }
+    }
+  }
+}
