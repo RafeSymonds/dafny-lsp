@@ -119,7 +119,12 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
   const command = serverPath(context);
   const serverOptions: ServerOptions = { run: { command }, debug: { command } };
   const clientOptions: LanguageClientOptions = {
-    documentSelector: [{ language: 'dafny' }],
+    // Live Share guests open files under the vsls: scheme and get the host's
+    // language features, so a local server must not handle them too.
+    documentSelector: [
+      { scheme: 'file', language: 'dafny' },
+      { scheme: 'untitled', language: 'dafny' },
+    ],
     initializationOptions: settings(),
     synchronize: { configurationSection: 'dafny-lsp' },
   };

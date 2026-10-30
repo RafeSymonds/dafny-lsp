@@ -7,6 +7,7 @@
     { "include": "#attributes" },
     { "include": "#strings" },
     { "include": "#declarations" },
+    { "include": "#type-refs" },
     { "include": "#keywords" },
     { "include": "#types" },
     { "include": "#constants" },
@@ -117,6 +118,46 @@
     "types": {
       "name": "support.type.builtin.dafny",
       "match": "\\b(int|nat|real|bool|char|string|seq|set|iset|multiset|map|imap|object\\??|ORDINAL|array[0-9]*\\??|bv[0-9]+|fp32|fp64)\\b"
+    },
+    "type-refs": {
+      "patterns": [
+        {
+          "match": "\\b(label)\\s+([A-Za-z_][A-Za-z0-9_?']*)\\s*(:)",
+          "captures": {
+            "1": { "name": "keyword.control.dafny" },
+            "2": { "name": "entity.name.label.dafny" }
+          }
+        },
+        {
+          "match": "(?<!:)(:)(?![:=|-])\\s*([A-Za-z_][A-Za-z0-9_?'.]*)",
+          "captures": { "2": { "patterns": [{ "include": "#type-name" }] } }
+        },
+        {
+          "match": "\\b(new|is|as)\\s+([A-Za-z_][A-Za-z0-9_?'.]*)",
+          "captures": {
+            "1": { "name": "keyword.other.dafny" },
+            "2": { "patterns": [{ "include": "#type-name" }] }
+          }
+        },
+        {
+          "begin": "\\b(extends)\\b",
+          "beginCaptures": { "1": { "name": "keyword.declaration.dafny" } },
+          "end": "(?=\\{)",
+          "patterns": [{ "include": "#comments" }, { "include": "#type-args" }, { "include": "#type-name" }]
+        },
+        { "include": "#type-args" }
+      ]
+    },
+    "type-args": {
+      "begin": "(?<=[A-Za-z0-9_?])<(?=(?:[A-Za-z0-9_?'.<>]|,\\s*)*>)",
+      "end": ">",
+      "patterns": [{ "include": "#type-args" }, { "include": "#type-name" }]
+    },
+    "type-name": {
+      "patterns": [
+        { "include": "#types" },
+        { "name": "entity.name.type.dafny", "match": "[A-Za-z_][A-Za-z0-9_?'.]*" }
+      ]
     },
     "constants": {
       "patterns": [

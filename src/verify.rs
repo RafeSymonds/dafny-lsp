@@ -414,7 +414,11 @@ impl DocVerification {
         let n = doc.index.line_count();
         let mut lines = vec![0i32; n];
         let obsolete = |v: i32, dirty: bool| if dirty && v >= 200 { v + 1 } else { v };
+        let mut spans: HashMap<&str, (u32, u32)> = HashMap::new();
         for s in symbols::verifiables(&doc.syms.symbols) {
+            let first = doc.index.line_of(s.range.start);
+            let last = doc.index.line_of(s.range.end).min(n - 1);
+            spans.insert(&s.qname, (first as u32, last as u32));
             let dirty = self.dirty.contains(&s.qname);
             let base = match self.statuses.get(&s.qname).copied().unwrap_or(Status::Stale) {
                 Status::Correct => 200,
@@ -423,8 +427,6 @@ impl DocVerification {
                 Status::Queued => 1,
                 Status::Stale => continue,
             };
-            let first = doc.index.line_of(s.range.start);
-            let last = doc.index.line_of(s.range.end).min(n - 1);
             for l in &mut lines[first..=last] {
                 *l = obsolete(base, dirty);
             }
@@ -439,9 +441,14 @@ impl DocVerification {
         for (d, qname) in &self.verify {
             let v = obsolete(400, self.dirty.contains(qname));
             mark(&mut lines, &d.range, v);
+            // Like `dafny server`, mark related locations only inside the failing
+            // declaration: the postcondition of a failing return, but not the
+            // callee's precondition at a failing call.
+            let Some(&(first, last)) = spans.get(qname.as_str()) else { continue };
             for r in d.related_information.iter().flatten() {
-                if r.location.uri == doc.uri {
-                    mark(&mut lines, &r.location.range, v);
+                let range = &r.location.range;
+                if r.location.uri == doc.uri && first <= range.start.line && range.end.line <= last {
+                    mark(&mut lines, range, v);
                 }
             }
         }
@@ -547,5 +554,30 @@ mod tests {
         assert!(dv.dirty.contains("B"));
         assert_eq!(dv.status("B"), Status::Stale);
         assert_eq!(dv.status("A"), Status::Error);
+    }
+
+    #[test]
+    fn gutter_marks_related_locations_only_inside_the_failing_declaration() {
+        let uri = Url::parse("file:///ws/a.dfy").unwrap();
+        let text = "method Callee(x: int)\n  requires x > 0\n{}\nmethod Caller() returns (r: int)\n  ensures r > 0\n{\n  Callee(0);\n}\n";
+        let file = FileData::new(uri.clone(), Some(1), text.into(), None, None);
+        let line = |l| Range::new(Position::new(l, 0), Position::new(l, 1));
+        let diag = |l, related| Diagnostic {
+            range: line(l),
+            related_information: Some(vec![DiagnosticRelatedInformation {
+                location: Location::new(uri.clone(), line(related)),
+                message: String::new(),
+            }]),
+            ..Default::default()
+        };
+        let mut dv = DocVerification::default();
+        // precondition of Callee fails at the call, postcondition of Caller fails at the return
+        dv.verify = vec![(diag(6, 1), "Caller".into()), (diag(7, 4), "Caller".into())];
+        dv.statuses.insert("Callee".into(), Status::Correct);
+        dv.statuses.insert("Caller".into(), Status::Error);
+        let gutter = dv.gutter(&file);
+        assert_eq!(gutter[1], 200);
+        assert_eq!(gutter[4], 400);
+        assert_eq!(gutter[6], 400);
     }
 }
