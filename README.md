@@ -67,8 +67,9 @@ verification status in the gutter, and adds these commands: `Dafny: Verify File`
 `Dafny: Verify Declaration at Cursor`, `Dafny: Cancel Verification`,
 `Dafny: Restart Language Server`.
 
-Disable the official Dafny extension (`dafny-lang.ide-vscode`) while using this
-one. Otherwise both language servers run and every diagnostic shows up twice.
+If the official Dafny extension (`dafny-lang.ide-vscode`) is enabled, this one
+leaves diagnostics, verification and the gutter to it and hides its verification
+commands. Completion, navigation, hover and symbols still come from dafny-lsp.
 
 ## Settings
 
@@ -78,6 +79,7 @@ settings.
 | Setting                 | Default   | Meaning |
 |-------------------------|-----------|---------|
 | `dafnyPath`             | `"dafny"` | dafny executable |
+| `diagnostics`           | `true`    | `false`: never run dafny, so there are no diagnostics, verification or gutter notifications |
 | `verifyOn`              | `"save"`  | `"change"`: verify after each edit. `"save"`: type check after each edit, verify on open and save. `"never"`: type check only, verify through commands |
 | `debounceMs`            | `300`     | delay after the last edit before dafny runs |
 | `verificationTimeLimit` | unset     | seconds per assertion batch (`--verification-time-limit`) |

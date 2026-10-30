@@ -62,15 +62,15 @@
       "commandPalette": [
         {
           "command": "dafny-lsp.verifyFile",
-          "when": "editorLangId == dafny"
+          "when": "editorLangId == dafny && !dafny-lsp.deferToOfficial"
         },
         {
           "command": "dafny-lsp.verifyCursor",
-          "when": "editorLangId == dafny"
+          "when": "editorLangId == dafny && !dafny-lsp.deferToOfficial"
         },
         {
           "command": "dafny-lsp.cancelVerification",
-          "when": "editorLangId == dafny"
+          "when": "editorLangId == dafny && !dafny-lsp.deferToOfficial"
         }
       ]
     },

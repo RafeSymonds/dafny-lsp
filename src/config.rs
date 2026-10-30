@@ -16,6 +16,9 @@ pub enum VerifyOn {
 #[serde(rename_all = "camelCase", default)]
 pub struct Config {
     pub dafny_path: String,
+    /// Run dafny for diagnostics and verification. False leaves both to another
+    /// extension, such as the official Dafny one.
+    pub diagnostics: bool,
     pub verify_on: VerifyOn,
     pub debounce_ms: u64,
     /// Seconds per assertion batch, passed as --verification-time-limit.
@@ -30,6 +33,7 @@ impl Default for Config {
     fn default() -> Self {
         Config {
             dafny_path: "dafny".to_string(),
+            diagnostics: true,
             verify_on: VerifyOn::Save,
             debounce_ms: 300,
             verification_time_limit: None,
@@ -72,6 +76,9 @@ mod tests {
         let c = Config::from_value(&json!({"verificationTimeLimit": 10})).unwrap().unwrap();
         assert_eq!(c.verification_time_limit, Some(10));
         assert_eq!(c.dafny_path, "dafny");
+        assert!(c.diagnostics);
+        let c = Config::from_value(&json!({"diagnostics": false})).unwrap().unwrap();
+        assert!(!c.diagnostics);
         assert!(Config::from_value(&json!({})).is_none());
         assert!(Config::from_value(&json!(null)).is_none());
     }

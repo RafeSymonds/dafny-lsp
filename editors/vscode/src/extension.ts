@@ -2,17 +2,27 @@ import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
 import * as vscode from 'vscode';
-import { LanguageClient, LanguageClientOptions, ServerOptions } from 'vscode-languageclient/node';
+import {
+  DidChangeConfigurationNotification,
+  LanguageClient,
+  LanguageClientOptions,
+  ServerOptions,
+} from 'vscode-languageclient/node';
 
 let client: LanguageClient | undefined;
 let gutter: Gutter | undefined;
 
 const OFFICIAL_EXTENSION = 'dafny-lang.ide-vscode';
 
+/** True when the official Dafny extension is enabled. It then owns diagnostics,
+ * verification and the gutter, and this extension only adds editor features. */
+let deferToOfficial = false;
+
 function settings(): Record<string, unknown> {
   const cfg = vscode.workspace.getConfiguration('dafny-lsp');
   return {
     dafnyPath: cfg.get<string>('dafnyPath'),
+    diagnostics: !deferToOfficial,
     verifyOn: cfg.get<string>('verifyOn'),
     debounceMs: cfg.get<number>('debounceMs'),
     verificationTimeLimit: cfg.get<number | null>('verificationTimeLimit'),
@@ -126,7 +136,6 @@ async function startClient(context: vscode.ExtensionContext): Promise<void> {
       { scheme: 'untitled', language: 'dafny' },
     ],
     initializationOptions: settings(),
-    synchronize: { configurationSection: 'dafny-lsp' },
   };
   client = new LanguageClient('dafny-lsp', 'Dafny (dafny-lsp)', serverOptions, clientOptions);
   client.onNotification('dafny/verification/status/gutter', (params: { uri: string; perLineStatus: number[] }) => {
@@ -147,29 +156,20 @@ async function runServerCommand(command: string, withPosition: boolean): Promise
   await client.sendRequest('workspace/executeCommand', { command, arguments: args });
 }
 
-function warnAboutOfficialExtension(): void {
-  if (!vscode.extensions.getExtension(OFFICIAL_EXTENSION)) {
-    return;
-  }
-  const open = 'Show Extension';
-  vscode.window
-    .showWarningMessage(
-      'The Dafny extension (dafny-lang.ide-vscode) is also enabled and runs its own language server, so diagnostics will show up twice. Disable one of the two extensions.',
-      open,
-    )
-    .then((choice) => {
-      if (choice === open) {
-        vscode.commands.executeCommand('workbench.extensions.search', `@id:${OFFICIAL_EXTENSION}`);
-      }
-    });
-}
-
 export async function activate(context: vscode.ExtensionContext): Promise<void> {
+  deferToOfficial = vscode.extensions.getExtension(OFFICIAL_EXTENSION) !== undefined;
+  await vscode.commands.executeCommand('setContext', 'dafny-lsp.deferToOfficial', deferToOfficial);
   gutter = new Gutter(context);
   context.subscriptions.push(
     gutter,
     vscode.window.onDidChangeVisibleTextEditors((editors) => editors.forEach((e) => gutter?.apply(e))),
     vscode.workspace.onDidCloseTextDocument((doc) => gutter?.forget(doc.uri.toString())),
+    // Sent by hand rather than through `synchronize` so the server also gets `diagnostics`.
+    vscode.workspace.onDidChangeConfiguration((e) => {
+      if (e.affectsConfiguration('dafny-lsp')) {
+        client?.sendNotification(DidChangeConfigurationNotification.type, { settings: settings() });
+      }
+    }),
     vscode.commands.registerCommand('dafny-lsp.verifyFile', () => runServerCommand('dafny-lsp.verify', false)),
     vscode.commands.registerCommand('dafny-lsp.verifyCursor', () => runServerCommand('dafny-lsp.verifyAt', true)),
     vscode.commands.registerCommand('dafny-lsp.cancelVerification', () => runServerCommand('dafny-lsp.cancel', false)),
@@ -178,7 +178,6 @@ export async function activate(context: vscode.ExtensionContext): Promise<void> 
       await startClient(context);
     }),
   );
-  warnAboutOfficialExtension();
   await startClient(context);
 }
 

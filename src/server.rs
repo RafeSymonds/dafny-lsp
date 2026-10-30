@@ -174,6 +174,9 @@ impl Backend {
 
     /// Sends diagnostics and the verification status notifications for a document.
     async fn publish(&self, uri: &Url) {
+        if !self.st().config().diagnostics {
+            return;
+        }
         let Some(doc) = self.st().doc(uri) else { return };
         let enc = self.enc();
         let (diags, symbol_params, gutter) = {
@@ -194,6 +197,9 @@ impl Backend {
 
     /// Starts a dafny run after `delay`, replacing any pending or running run of the same kind.
     fn schedule(&self, uri: Url, mode: Mode, delay: Duration) {
+        if !self.st().config().diagnostics {
+            return;
+        }
         let this = self.clone();
         let mut tasks = self.inner.tasks.lock().unwrap();
         let slots = tasks.entry(uri.clone()).or_default();
