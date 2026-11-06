@@ -31,6 +31,8 @@ pub struct FileData {
     pub raw_tree: Tree,
     pub syms: FileSymbols,
     pub mtime: Option<SystemTime>,
+    /// Lines blanked to build `tree`, empty when `tree` parses the actual text.
+    pub dirty: Vec<usize>,
 }
 
 impl FileData {
@@ -38,7 +40,7 @@ impl FileData {
         let path = uri.to_file_path().ok().map(|p| normalize(&p));
         let raw_tree = syntax::parse(&text, old_tree);
         let syms = symbols::extract(raw_tree.root_node(), &text);
-        FileData { uri, path, version, index: LineIndex::new(&text), text, tree: raw_tree.clone(), raw_tree, syms, mtime }
+        FileData { uri, path, version, index: LineIndex::new(&text), text, tree: raw_tree.clone(), raw_tree, syms, mtime, dirty: Vec::new() }
     }
 
     pub fn root(&self) -> Node<'_> {
@@ -63,35 +65,77 @@ impl FileData {
     /// being edited, and tree-sitter's recovery can wrap a whole module in an
     /// ERROR node. This blanks the lines that differ from the last version
     /// that parsed cleanly (keeping byte offsets) and analyses that instead.
-    pub fn repair(&mut self, last_good: &FileData) {
+    /// Returns false when blanking the changed lines does not parse cleanly either.
+    pub fn repair(&mut self, last_good: &FileData) -> bool {
         if !self.has_syntax_errors() {
-            return;
+            return true;
         }
-        let Some(lines) = changed_lines(&last_good.text, &self.text) else { return };
-        let blanked = blank_lines(&self.text, &self.index, lines);
-        let tree = syntax::parse(&blanked, None);
-        self.adopt(tree);
+        let Some(lines) = changed_lines(&last_good.text, &self.text) else { return false };
+        let blanked = blank_lines(&self.text, &self.index, &lines);
+        let ok = self.adopt(syntax::parse(&blanked, None));
+        if ok {
+            self.dirty = lines;
+        }
+        ok
     }
 
-    /// A copy of this file analysed with one more line blanked, if that makes
-    /// the analysis tree parse cleanly. Used for completion on a half-typed line.
-    pub fn without_line(&self, line: usize) -> Option<FileData> {
-        if !self.tree.root_node().has_error() {
+    /// A copy of this file analysed as if the line holding `offset` were
+    /// finished, for completion on a half-typed line. Lines blanked by `repair`
+    /// stay blanked. With `cut`, the start of the member access being typed
+    /// (`x.fo|` or `x.(|`), it first removes only `cut..offset`, putting a
+    /// closing character at `cut`, so that binders earlier on the line, as in
+    /// `case Some(b) => b.`, stay in the tree. If brackets opened earlier on the
+    /// line are still open, it also tries without them: that changes how the
+    /// line groups, not what is in scope. Otherwise it blanks the whole line.
+    pub fn typing_view(&self, offset: usize, cut: Option<usize>) -> Option<FileData> {
+        if !self.has_syntax_errors() {
             return None;
         }
-        let blanked = blank_lines(&self.text, &self.index, line..line + 1);
-        let mut copy = FileData {
-            uri: self.uri.clone(),
-            path: self.path.clone(),
-            version: self.version,
-            text: self.text.clone(),
-            index: self.index.clone(),
-            tree: self.tree.clone(),
-            raw_tree: self.raw_tree.clone(),
-            syms: self.syms.clone(),
-            mtime: self.mtime,
-        };
-        copy.adopt(syntax::parse(&blanked, None)).then_some(copy)
+        let line = self.index.line_of(offset);
+        let mut others = self.dirty.clone();
+        others.retain(|l| *l != line);
+        let base = blank_lines(&self.text, &self.index, &others).into_bytes();
+        let mut attempts = Vec::new();
+        if let Some(cut) = cut.filter(|c| *c < offset && self.index.line_of(*c) == line) {
+            let mut patched = base.clone();
+            patched[cut..offset].fill(b' ');
+            let mut unclosed = patched.clone();
+            for i in open_brackets(&patched[self.index.line_start(line)..cut]) {
+                unclosed[self.index.line_start(line) + i] = b' ';
+            }
+            for (bytes, fillers) in [(patched, &[b' ', b';', b')'][..]), (unclosed, &[b' ', b';'][..])] {
+                for &filler in fillers {
+                    let mut bytes = bytes.clone();
+                    bytes[cut] = filler;
+                    attempts.push((bytes, others.clone()));
+                }
+            }
+        }
+        let mut whole = others.clone();
+        whole.push(line);
+        attempts.push((blank_lines(&self.text, &self.index, &whole).into_bytes(), whole));
+        for (bytes, dirty) in attempts {
+            let text = String::from_utf8(bytes).expect("only ASCII bytes were written");
+            let tree = syntax::parse(&text, None);
+            if tree.root_node().has_error() {
+                continue;
+            }
+            let mut copy = FileData {
+                uri: self.uri.clone(),
+                path: self.path.clone(),
+                version: self.version,
+                text: self.text.clone(),
+                index: self.index.clone(),
+                tree: self.tree.clone(),
+                raw_tree: self.raw_tree.clone(),
+                syms: self.syms.clone(),
+                mtime: self.mtime,
+                dirty,
+            };
+            copy.adopt(tree);
+            return Some(copy);
+        }
+        None
     }
 
     pub fn pos(&self, offset: usize, enc: Encoding) -> lsp::Position {
@@ -111,9 +155,10 @@ impl FileData {
     }
 }
 
-/// Lines of `new` that differ from `old`, found by trimming the common
-/// leading and trailing lines. None when there is no change or most of the file changed.
-fn changed_lines(old: &str, new: &str) -> Option<Range<usize>> {
+/// Lines of `new` that are not in `old`: edited or inserted lines, found with
+/// a line diff so that unchanged lines between two edits are left alone. None
+/// when there is no such line or most of the file changed.
+fn changed_lines(old: &str, new: &str) -> Option<Vec<usize>> {
     let old_lines: Vec<&str> = old.split('\n').collect();
     let new_lines: Vec<&str> = new.split('\n').collect();
     let prefix = old_lines.iter().zip(&new_lines).take_while(|(a, b)| a == b).count();
@@ -125,27 +170,110 @@ fn changed_lines(old: &str, new: &str) -> Option<Range<usize>> {
         .take(max_suffix)
         .take_while(|(a, b)| a == b)
         .count();
-    let end = new_lines.len() - suffix;
-    if prefix >= end || (end - prefix) * 2 > new_lines.len().max(20) {
+    let limit = new_lines.len().max(20) / 2;
+    let inserted = inserted_lines(
+        &old_lines[prefix..old_lines.len() - suffix],
+        &new_lines[prefix..new_lines.len() - suffix],
+        limit,
+    )?;
+    if inserted.is_empty() || inserted.len() > limit {
         return None;
     }
-    Some(prefix..end)
+    Some(inserted.into_iter().map(|l| l + prefix).collect())
+}
+
+/// Indexes of the lines of `b` that a shortest edit script from `a` inserts
+/// (Myers' diff). None when the script needs more than `max_d` edits.
+fn inserted_lines(a: &[&str], b: &[&str], max_d: usize) -> Option<Vec<usize>> {
+    let (n, m) = (a.len() as isize, b.len() as isize);
+    let off = max_d as isize + 1;
+    // v[k + off] is the furthest x reached on diagonal k = x - y.
+    let mut v = vec![0isize; 2 * max_d + 3];
+    let mut trace = Vec::new();
+    for d in 0..=max_d as isize {
+        trace.push(v.clone());
+        for k in (-d..=d).step_by(2) {
+            let i = (k + off) as usize;
+            let mut x = if k == -d || (k != d && v[i - 1] < v[i + 1]) { v[i + 1] } else { v[i - 1] + 1 };
+            let mut y = x - k;
+            while x < n && y < m && a[x as usize] == b[y as usize] {
+                x += 1;
+                y += 1;
+            }
+            v[i] = x;
+            if x >= n && y >= m {
+                return Some(backtrack(&trace, off, n, m));
+            }
+        }
+    }
+    None
+}
+
+fn backtrack(trace: &[Vec<isize>], off: isize, n: isize, m: isize) -> Vec<usize> {
+    let mut inserted = Vec::new();
+    let (mut x, mut y) = (n, m);
+    for d in (0..trace.len() as isize).rev() {
+        let v = &trace[d as usize];
+        let k = x - y;
+        let i = (k + off) as usize;
+        let prev_k = if k == -d || (k != d && v[i - 1] < v[i + 1]) { k + 1 } else { k - 1 };
+        let prev_x = v[(prev_k + off) as usize];
+        let prev_y = prev_x - prev_k;
+        while x > prev_x && y > prev_y {
+            x -= 1;
+            y -= 1;
+        }
+        // A step down from (prev_x, prev_y) inserts line prev_y of `b`.
+        if d > 0 && x == prev_x {
+            inserted.push(prev_y as usize);
+        }
+        x = prev_x;
+        y = prev_y;
+    }
+    inserted.reverse();
+    inserted
 }
 
 /// Replaces every byte on the given lines with a space, keeping line breaks and offsets.
-fn blank_lines(text: &str, index: &LineIndex, lines: Range<usize>) -> String {
+fn blank_lines(text: &str, index: &LineIndex, lines: &[usize]) -> String {
     let mut bytes = text.as_bytes().to_vec();
-    for line in lines {
+    for &line in lines {
         if line >= index.line_count() {
-            break;
+            continue;
         }
         let start = index.line_start(line);
         let end = index.line_end(text, line);
-        for b in &mut bytes[start..end] {
-            *b = b' ';
-        }
+        bytes[start..end].fill(b' ');
     }
     String::from_utf8(bytes).expect("only ASCII spaces were written")
+}
+
+/// Positions in `line` of the brackets that are opened and not closed.
+fn open_brackets(line: &[u8]) -> Vec<usize> {
+    let mut stack = Vec::new();
+    for (i, &b) in line.iter().enumerate() {
+        match b {
+            b'(' | b'[' | b'{' => stack.push(i),
+            b')' | b']' | b'}' => {
+                stack.pop();
+            }
+            _ => {}
+        }
+    }
+    stack
+}
+
+/// How many runs of clean versions `State` remembers per document.
+const MAX_GOOD_RUNS: usize = 4;
+
+/// Recent versions of a document that parsed cleanly, oldest first: the last
+/// version of each run of consecutive clean versions. Typing through clean
+/// states extends a run, so a run of keystrokes does not push older runs out.
+#[derive(Default)]
+struct GoodVersions {
+    runs: Vec<Arc<FileData>>,
+    /// The latest version stored was clean, so the next clean one replaces it.
+    in_run: bool,
 }
 
 /// Where an edit happened, in lines of the text before the edit.
@@ -246,7 +374,7 @@ pub struct State {
     project_files: Mutex<HashMap<PathBuf, (Instant, Option<PathBuf>)>>,
     projects: Mutex<HashMap<PathBuf, (Option<SystemTime>, Option<Arc<Project>>)>>,
     /// Newest version of each open document that parsed without syntax errors.
-    last_good: Mutex<HashMap<Url, Arc<FileData>>>,
+    last_good: Mutex<HashMap<Url, GoodVersions>>,
     pub encoding: RwLock<Encoding>,
     pub config: RwLock<Config>,
 }
@@ -288,12 +416,27 @@ impl State {
     /// Stores an open document, repairing its analysis tree if it has syntax errors.
     pub fn put_doc(&self, mut doc: FileData) -> Arc<FileData> {
         let mut last_good = self.last_good.lock().unwrap();
-        if let Some(good) = last_good.get(&doc.uri) {
-            doc.repair(good);
+        let good = last_good.entry(doc.uri.clone()).or_default();
+        // Newest first. An older version helps when a half-typed edit happened
+        // to parse, e.g. a lemma body read as the expression of an unfinished
+        // `requires`, and the newest clean version is that misreading.
+        for g in good.runs.iter().rev() {
+            if doc.repair(g) {
+                break;
+            }
         }
         let doc = Arc::new(doc);
-        if !doc.has_syntax_errors() {
-            last_good.insert(doc.uri.clone(), doc.clone());
+        if doc.has_syntax_errors() {
+            good.in_run = false;
+        } else {
+            if good.in_run {
+                good.runs.pop();
+            }
+            good.runs.push(doc.clone());
+            if good.runs.len() > MAX_GOOD_RUNS {
+                good.runs.remove(0);
+            }
+            good.in_run = true;
         }
         self.docs.write().unwrap().insert(doc.uri.clone(), doc.clone());
         doc
@@ -485,6 +628,16 @@ mod tests {
             range_length: None,
             text: text.to_string(),
         }
+    }
+
+    #[test]
+    fn changed_lines_skip_unchanged_lines_between_edits() {
+        let old = (0..30).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+        let mut lines: Vec<String> = old.split('\n').map(String::from).collect();
+        lines[3] = "edited".into();
+        lines.insert(20, "inserted".into());
+        assert_eq!(changed_lines(&old, &lines.join("\n")), Some(vec![3, 20]));
+        assert_eq!(changed_lines(&old, &old), None);
     }
 
     #[test]

@@ -138,8 +138,17 @@ fn parse_summary(s: &str) -> Option<(usize, usize)> {
 
 /// For requests made while typing: if the line under the cursor is what breaks
 /// the parse, analyse the document without that line.
+/// The document as analysed while the line at `offset` is half typed.
 fn typing_view(doc: Arc<FileData>, offset: usize) -> Arc<FileData> {
-    match doc.without_line(doc.index.line_of(offset)) {
+    // The `.` that starts the member access or update being typed: `x.fo|`, `x.(|`.
+    let b = doc.text.as_bytes();
+    let word = completion::word_start(&doc.text, offset);
+    let cut = match (word.checked_sub(1).map(|i| b[i]), word.checked_sub(2).map(|i| b[i])) {
+        (Some(b'.'), prev) if prev != Some(b'.') => Some(word - 1),
+        (Some(b'('), Some(b'.')) => Some(word - 2),
+        _ => None,
+    };
+    match doc.typing_view(offset, cut) {
         Some(view) => Arc::new(view),
         None => doc,
     }

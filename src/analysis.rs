@@ -487,29 +487,81 @@ fn push_ctors(s: &SymRef, out: &mut Vec<SymRef>) {
     }
 }
 
-/// Adds datatype constructors and the members of opened imports, which are
-/// visible without qualification.
-fn expand(st: &State, syms: Vec<SymRef>, follow_imports: bool, depth: u32) -> Vec<SymRef> {
-    let mut out = Vec::with_capacity(syms.len());
+/// Adds datatype constructors. With `follow_imports`, also returns the members
+/// of opened imports separately: they are visible without qualification, but
+/// the module's own declarations take precedence over them.
+fn expand_split(st: &State, syms: Vec<SymRef>, follow_imports: bool, depth: u32) -> (Vec<SymRef>, Vec<SymRef>) {
+    let mut own = Vec::with_capacity(syms.len());
+    let mut opened = Vec::new();
     for s in syms {
         let sym = s.sym();
         if sym.kind == Kind::Datatype {
-            push_ctors(&s, &mut out);
+            push_ctors(&s, &mut own);
         } else if sym.kind == Kind::Import && sym.opened && follow_imports {
             if let Some(m) = resolve_import(st, &s, depth + 1) {
                 for c in m.children() {
                     if c.sym().kind == Kind::Datatype {
-                        push_ctors(&c, &mut out);
+                        push_ctors(&c, &mut opened);
                     }
                     if c.sym().kind != Kind::Import {
-                        out.push(c);
+                        opened.push(c);
                     }
                 }
             }
         }
-        out.push(s);
+        own.push(s);
     }
-    out
+    (own, opened)
+}
+
+fn expand(st: &State, syms: Vec<SymRef>, follow_imports: bool, depth: u32) -> Vec<SymRef> {
+    let (mut own, opened) = expand_split(st, syms, follow_imports, depth);
+    own.extend(opened);
+    own
+}
+
+/// The module that `m` refines, `module B refines A`. Looked up beside `m`
+/// rather than through the scopes, which would ask for `m`'s levels again.
+fn refined_module(st: &State, m: &SymRef) -> Option<SymRef> {
+    let target = m.sym().target.as_ref()?;
+    let segs: Vec<&str> = target.split('.').collect();
+    let (first, rest) = segs.split_first()?;
+    let siblings = match m.parent() {
+        Some(p) => p.children(),
+        None => {
+            let mut top = top_level(&m.file);
+            for f in st.scope_files(&m.file) {
+                top.extend(top_level(&f));
+            }
+            top
+        }
+    };
+    let is_module = |s: &SymRef, name: &str| s.sym().kind == Kind::Module && s.sym().name == name;
+    let mut cur = siblings
+        .into_iter()
+        .find(|s| is_module(s, first))
+        .or_else(|| global_find(st, first, |s| s.kind == Kind::Module).into_iter().next())?;
+    for seg in rest {
+        cur = cur.children().into_iter().find(|c| is_module(c, seg))?;
+    }
+    (!cur.same(m)).then_some(cur)
+}
+
+/// Levels for one module: its own declarations, those of the modules it
+/// refines (which it inherits, imports included), then the members of opened imports.
+fn push_module_levels(st: &State, m: &SymRef, follow_imports: bool, depth: u32, levels: &mut Vec<Vec<SymRef>>) {
+    let mut opened = Vec::new();
+    let mut cur = Some(m.clone());
+    for _ in 0..4 {
+        let Some(module) = cur else { break };
+        let (own, imported) = expand_split(st, module.children(), follow_imports, depth);
+        levels.push(own);
+        opened.extend(imported);
+        cur = refined_module(st, &module).filter(|r| !r.same(m));
+    }
+    if !opened.is_empty() {
+        levels.push(opened);
+    }
 }
 
 /// Module-level scopes around `offset`, innermost first, ending with the
@@ -518,14 +570,18 @@ fn module_levels(st: &State, file: &Arc<FileData>, offset: usize, follow_imports
     let mut levels = Vec::new();
     for s in chain_at(file, offset).into_iter().rev() {
         if s.sym().kind == Kind::Module {
-            levels.push(expand(st, s.children(), follow_imports, depth));
+            push_module_levels(st, &s, follow_imports, depth, &mut levels);
         }
     }
     let mut top = top_level(file);
     for f in st.scope_files(file) {
         top.extend(top_level(&f));
     }
-    levels.push(expand(st, top, follow_imports, depth));
+    let (own, opened) = expand_split(st, top, follow_imports, depth);
+    levels.push(own);
+    if !opened.is_empty() {
+        levels.push(opened);
+    }
     levels
 }
 
@@ -839,6 +895,11 @@ pub fn classify(st: &State, t: &Target) -> Val {
                     return v;
                 }
             }
+            if local.kind == LocalKind::Bound {
+                if let Some(v) = bound_type(st, file, local) {
+                    return v;
+                }
+            }
             let Some(init) = &local.init else { return Val::Unknown };
             let Some(node) = find_node_with_range(file.root(), &init.range) else { return Val::Unknown };
             // `var a, b := M();` takes the matching out parameter.
@@ -855,23 +916,124 @@ pub fn classify(st: &State, t: &Target) -> Val {
     }
 }
 
-/// Type of a variable bound by a constructor pattern, `case Ctor(x, y) =>`,
-/// taken from the constructor's parameter list.
+/// Type of a variable bound by a constructor pattern, `case Ctor(x, y) =>`.
 fn pattern_type(st: &State, file: &Arc<FileData>, local: &Local) -> Option<Val> {
     let ident = find_node_with_range(file.root(), &local.name_range)?;
-    let mut pat = ident.parent()?;
-    if pat.kind() == "id_pattern" {
-        pat = pat.parent()?;
-    }
-    let is_ctor_pattern = pat.kind() == "constructor_pattern"
-        || (pat.kind() == "case_pattern" && pat.child(1).map(|c| c.kind()) == Some("("));
-    if !is_ctor_pattern {
+    let pat = match ident.parent() {
+        Some(p) if p.kind() == "id_pattern" => p,
+        _ => ident,
+    };
+    subpattern_type(st, file, pat, 0)
+}
+
+/// Type of a quantifier variable declared without one, from its domain:
+/// `x <- S`, or a range that contains `x in S`.
+fn bound_type(st: &State, file: &Arc<FileData>, local: &Local) -> Option<Val> {
+    let ident = find_node_with_range(file.root(), &local.name_range)?;
+    let var = ident.parent().filter(|p| p.kind() == "quantifier_var")?;
+    let expr = named_children(var).into_iter().find(|n| n.start_byte() >= ident.end_byte())?;
+    let collection = if file.text[ident.end_byte()..expr.start_byte()].contains("<-") {
+        expr.byte_range()
+    } else {
+        let domain = var.parent()?;
+        descendants(domain).into_iter().find_map(|n| membership_range(n, &local.name, &file.text))?
+    };
+    // Evaluate S as a receiver chain when it is one, which also covers the
+    // suffixes the grammar moved off it.
+    let (segs, start) = chain_span(&file.text, collection.end);
+    let set = if !segs.is_empty() && start == collection.start {
+        eval_chain(st, file, start, &segs)
+    } else {
+        infer(st, file, find_node_with_range(file.root(), &collection)?, 1)
+    };
+    Some(element_val(st, &set))
+}
+
+/// The bytes of `S` in a relational expression `name in S`. The grammar
+/// attaches suffixes to the whole expression, reading `x in a.b` as
+/// `(x in a).b`, so suffixes above it belong to `S`.
+fn membership_range(node: Node, name: &str, src: &str) -> Option<Range<usize>> {
+    if node.kind() != "relational_expression" {
         return None;
     }
-    let ctor_ident = pat.named_child(0).filter(|n| n.kind() == "identifier")?;
-    let subpatterns: Vec<Node> = named_children(pat).into_iter().skip(1).collect();
-    let index = subpatterns.iter().position(|p| p.start_byte() <= local.name_range.start && local.name_range.end <= p.end_byte())?;
-    let ctor = ctor_hits(st, file, ctor_ident.start_byte(), text(ctor_ident, &file.text)).into_iter().next()?;
+    let kids = named_children(node);
+    let op = kids.iter().position(|k| k.kind() == "rel_op")?;
+    if text(kids[op], src).trim() != "in" {
+        return None;
+    }
+    let lhs = unwrap_expr(kids[op.checked_sub(1)?]);
+    let id = lhs.named_child(0).filter(|_| lhs.kind() == "name_segment")?;
+    if text(id, src) != name {
+        return None;
+    }
+    let rhs = kids.get(op + 1)?;
+    let mut end = rhs.end_byte();
+    let mut cur = node;
+    while let Some(p) = cur.parent().filter(|p| p.start_byte() == node.start_byte()) {
+        if p.end_byte() > end {
+            if !src[end..p.end_byte()].trim_start().starts_with(['.', '[', '(']) {
+                break;
+            }
+            end = p.end_byte();
+        }
+        cur = p;
+    }
+    Some(rhs.start_byte()..end)
+}
+
+/// Type of the elements `x in v` ranges over: map keys, set and sequence elements.
+fn element_val(st: &State, v: &Val) -> Val {
+    let Val::Typed(tv) = v else { return Val::Unknown };
+    let elem = match base_type_name(&tv.text) {
+        "string" => Some("char".to_string()),
+        "set" | "iset" | "multiset" | "seq" | "map" | "imap" => type_args(&tv.text).into_iter().next(),
+        b if b.starts_with("array") => type_args(&tv.text).into_iter().next(),
+        _ => None,
+    };
+    match elem {
+        Some(e) => typed(st, &tv.file, tv.offset, &e),
+        None => Val::Unknown,
+    }
+}
+
+fn is_ctor_pattern(node: Node) -> bool {
+    node.kind() == "constructor_pattern" || (node.kind() == "case_pattern" && node.child(1).map(|c| c.kind()) == Some("("))
+}
+
+/// Type of the value that pattern `pat` matches: the subject of the enclosing
+/// `match`, or a constructor parameter of the enclosing pattern.
+fn subpattern_type(st: &State, file: &Arc<FileData>, pat: Node, depth: u32) -> Option<Val> {
+    if depth > 8 {
+        return None;
+    }
+    let parent = pat.parent()?;
+    if matches!(parent.kind(), "case_expr_clause" | "case_stmt_clause") {
+        let subject = parent.parent()?.named_child(0)?;
+        return Some(infer(st, file, subject, depth + 1));
+    }
+    if !is_ctor_pattern(parent) {
+        return None;
+    }
+    let ctor_ident = parent.named_child(0).filter(|n| n.kind() == "identifier")?;
+    let ctor_name = text(ctor_ident, &file.text);
+    let index = named_children(parent).into_iter().skip(1).position(|p| p == pat)?;
+    // The constructor comes from the matched type, which also binds its type
+    // parameters: in `match o case Some(x)` with `o: Option<Host>`, x is a Host.
+    if let Some(Val::Typed(tv)) = subpattern_type(st, file, parent, depth + 1) {
+        if let Some(decl) = &tv.decl {
+            let ctor = members_of(st, decl, 0).into_iter().find(|m| m.sym().kind == Kind::Ctor && m.sym().name == ctor_name);
+            if let Some(ctor) = ctor {
+                let param = ctor.sym().params.get(index)?;
+                let type_params = ctor.parent().map(|o| o.sym().type_params.clone()).unwrap_or_default();
+                let bindings: Vec<(String, String)> = type_params.into_iter().zip(type_args(&tv.text)).collect();
+                return Some(match subst(&param.ty, &bindings) {
+                    Some(new) => typed(st, &tv.file, tv.offset, &new),
+                    None => typed(st, &ctor.file, ctor.sym().range.start, &param.ty),
+                });
+            }
+        }
+    }
+    let ctor = ctor_hits(st, file, ctor_ident.start_byte(), ctor_name).into_iter().next()?;
     let Target::Sym(ctor) = ctor else { return None };
     let param = ctor.sym().params.get(index)?;
     Some(typed(st, &ctor.file, ctor.sym().range.start, &param.ty))
@@ -1275,6 +1437,12 @@ fn is_ident_byte(b: u8) -> bool {
 
 /// Parses the expression chain that ends right before `end`, e.g. `a.b(x)[i]`.
 pub fn chain_before(src: &str, end: usize) -> Vec<Seg> {
+    chain_span(src, end).0
+}
+
+/// Like `chain_before`, also returning where the chain starts. Names in the
+/// chain resolve there, inside any scope that ends before the cursor.
+pub fn chain_span(src: &str, end: usize) -> (Vec<Seg>, usize) {
     let b = src.as_bytes();
     let mut i = end.min(b.len());
     let mut segs = Vec::new();
@@ -1286,7 +1454,7 @@ pub fn chain_before(src: &str, end: usize) -> Vec<Seg> {
             let mut j = i;
             loop {
                 if j == 0 {
-                    return Vec::new();
+                    return (Vec::new(), end);
                 }
                 j -= 1;
                 if b[j] == c {
@@ -1318,8 +1486,8 @@ pub fn chain_before(src: &str, end: usize) -> Vec<Seg> {
     }
     segs.reverse();
     match segs.first() {
-        Some(Seg::Name(n)) if !n.starts_with(|c: char| c.is_ascii_digit()) => segs,
-        _ => Vec::new(),
+        Some(Seg::Name(n)) if !n.starts_with(|c: char| c.is_ascii_digit()) => (segs, i),
+        _ => (Vec::new(), end),
     }
 }
 

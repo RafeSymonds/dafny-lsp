@@ -93,7 +93,7 @@ fn in_comment_or_string(file: &FileData, offset: usize) -> bool {
 }
 
 /// Start of the identifier being typed at `offset`.
-fn word_start(src: &str, offset: usize) -> usize {
+pub fn word_start(src: &str, offset: usize) -> usize {
     let b = src.as_bytes();
     let mut start = offset;
     while start > 0 && (b[start - 1].is_ascii_alphanumeric() || matches!(b[start - 1], b'_' | b'\'' | b'?') || b[start - 1] >= 0x80) {
@@ -121,11 +121,11 @@ pub fn complete(st: &State, file: &Arc<FileData>, offset: usize, snippets: bool)
         return ATTRIBUTES.iter().map(|a| plain_item(a, CompletionItemKind::PROPERTY, Some("attribute".into()), 0)).collect();
     }
     if before.ends_with('.') && !before.ends_with("..") {
-        let segs = analysis::chain_before(src, word_start - 1);
+        let (segs, start) = analysis::chain_span(src, word_start - 1);
         if segs.is_empty() {
             return Vec::new();
         }
-        let val = analysis::eval_chain(st, file, word_start, &segs);
+        let val = analysis::eval_chain(st, file, start, &segs);
         return member_items(st, file, &val);
     }
 
@@ -227,8 +227,8 @@ fn update_site(src: &str, word_start: usize, offset: usize) -> Option<UpdateSite
 /// not at a field name in an update.
 fn update_items(st: &State, file: &Arc<FileData>, word_start: usize, offset: usize) -> Option<Vec<CompletionItem>> {
     let site = update_site(&file.text, word_start, offset)?;
-    let segs = analysis::chain_before(&file.text, site.dot);
-    let val = if segs.is_empty() { Val::Unknown } else { analysis::eval_chain(st, file, word_start, &segs) };
+    let (segs, start) = analysis::chain_span(&file.text, site.dot);
+    let val = if segs.is_empty() { Val::Unknown } else { analysis::eval_chain(st, file, start, &segs) };
     let candidates = match &val {
         // Without a known receiver type, offer the fields of every datatype in scope.
         Val::Unknown => {
