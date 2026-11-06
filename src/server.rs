@@ -556,7 +556,8 @@ impl LanguageServer for Backend {
                     ..Default::default()
                 })),
                 completion_provider: Some(CompletionOptions {
-                    trigger_characters: Some(vec![".".into()]),
+                    // `(` and `,` open field names in a datatype update, `v.(f := x, g := y)`.
+                    trigger_characters: Some(vec![".".into(), "(".into(), ",".into()]),
                     ..Default::default()
                 }),
                 hover_provider: Some(HoverProviderCapability::Simple(true)),
@@ -676,8 +677,17 @@ impl LanguageServer for Backend {
         let Some((doc, offset)) = self.doc_and_offset(&tdp.text_document.uri, tdp.position) else { return Ok(None) };
         let doc = typing_view(doc, offset);
         let snippets = self.inner.caps.read().unwrap().snippets;
-        let items = self.blocking(move |st| completion::complete(st, &doc, offset, snippets)).await?;
-        Ok(Some(CompletionResponse::Array(items)))
+        let update_only = matches!(params.context.and_then(|c| c.trigger_character).as_deref(), Some("(" | ","));
+        let items = self
+            .blocking(move |st| {
+                if update_only {
+                    completion::update_completion(st, &doc, offset)
+                } else {
+                    Some(completion::complete(st, &doc, offset, snippets))
+                }
+            })
+            .await?;
+        Ok(items.map(CompletionResponse::Array))
     }
 
     async fn hover(&self, params: HoverParams) -> Result<Option<Hover>> {

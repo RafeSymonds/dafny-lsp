@@ -92,20 +92,30 @@ fn in_comment_or_string(file: &FileData, offset: usize) -> bool {
     })
 }
 
+/// Start of the identifier being typed at `offset`.
+fn word_start(src: &str, offset: usize) -> usize {
+    let b = src.as_bytes();
+    let mut start = offset;
+    while start > 0 && (b[start - 1].is_ascii_alphanumeric() || matches!(b[start - 1], b'_' | b'\'' | b'?') || b[start - 1] >= 0x80) {
+        start -= 1;
+    }
+    while !src.is_char_boundary(start) {
+        start += 1;
+    }
+    start
+}
+
 pub fn complete(st: &State, file: &Arc<FileData>, offset: usize, snippets: bool) -> Vec<CompletionItem> {
     if in_comment_or_string(file, offset) {
         return Vec::new();
     }
     let src = &file.text;
-    let b = src.as_bytes();
-    let mut word_start = offset;
-    while word_start > 0 && (b[word_start - 1].is_ascii_alphanumeric() || matches!(b[word_start - 1], b'_' | b'\'' | b'?') || b[word_start - 1] >= 0x80) {
-        word_start -= 1;
-    }
-    while !src.is_char_boundary(word_start) {
-        word_start += 1;
-    }
+    let word_start = word_start(src, offset);
     let before = &src[..word_start];
+
+    if let Some(items) = update_items(st, file, word_start, offset) {
+        return items;
+    }
 
     if before.ends_with("{:") || before.ends_with('@') {
         return ATTRIBUTES.iter().map(|a| plain_item(a, CompletionItemKind::PROPERTY, Some("attribute".into()), 0)).collect();
@@ -122,6 +132,124 @@ pub fn complete(st: &State, file: &Arc<FileData>, offset: usize, snippets: bool)
     let line_start = file.index.line_start(file.index.line_of(offset));
     let line_prefix = src[line_start..word_start].trim_start();
     general_items(st, file, word_start, snippets, line_prefix)
+}
+
+/// Completion for the `(` and `,` trigger characters, which only open a list
+/// inside a datatype update. None anywhere else.
+pub fn update_completion(st: &State, file: &Arc<FileData>, offset: usize) -> Option<Vec<CompletionItem>> {
+    if in_comment_or_string(file, offset) {
+        return None;
+    }
+    update_items(st, file, word_start(&file.text, offset), offset)
+}
+
+/// A field-name position inside a datatype update, `v.(a := 1, |)`.
+struct UpdateSite {
+    /// Offset of the `.` before the `(`.
+    dot: usize,
+    /// Fields assigned elsewhere in the same update. Dafny rejects duplicates.
+    assigned: Vec<String>,
+}
+
+/// Finds the update whose field list holds the word at `word_start`, when the
+/// word sits where a field name goes: right after the `(` or a top-level `,`.
+fn update_site(src: &str, word_start: usize, offset: usize) -> Option<UpdateSite> {
+    let b = src.as_bytes();
+
+    // Walk back to the unmatched `(`, noting top-level commas on the way.
+    let mut commas = Vec::new();
+    let mut depth = 0usize;
+    let mut i = word_start;
+    let open = loop {
+        if i == 0 {
+            return None;
+        }
+        i -= 1;
+        match b[i] {
+            b')' | b']' | b'}' => depth += 1,
+            b'(' | b'[' | b'{' if depth > 0 => depth -= 1,
+            b'(' => break i,
+            b'[' | b'{' => return None,
+            b';' if depth == 0 => return None,
+            b',' if depth == 0 => commas.push(i),
+            _ => {}
+        }
+    };
+    if open == 0 || b[open - 1] != b'.' || (open >= 2 && b[open - 2] == b'.') {
+        return None;
+    }
+    let seg_start = commas.first().map_or(open + 1, |c| c + 1);
+    if !src[seg_start..word_start].trim().is_empty() {
+        return None;
+    }
+
+    // Segments left of the cursor run between `(` and each comma.
+    let mut bounds = vec![open];
+    bounds.extend(commas.iter().rev());
+    let mut segments: Vec<&str> = bounds.windows(2).map(|w| &src[w[0] + 1..w[1]]).collect();
+
+    // Segments right of the cursor count only when the `)` is there to end them.
+    let mut right = Vec::new();
+    let mut depth = 0usize;
+    let mut j = offset;
+    let closed = loop {
+        if j >= b.len() {
+            break false;
+        }
+        match b[j] {
+            b'(' | b'[' | b'{' => depth += 1,
+            b')' | b']' | b'}' if depth > 0 => depth -= 1,
+            b')' => {
+                right.push(j);
+                break true;
+            }
+            b']' | b'}' => break false,
+            b';' if depth == 0 => break false,
+            b',' if depth == 0 => right.push(j),
+            _ => {}
+        }
+        j += 1;
+    };
+    if closed {
+        segments.extend(right.windows(2).map(|w| &src[w[0] + 1..w[1]]));
+    }
+
+    let assigned = segments
+        .iter()
+        .filter_map(|s| s.split_once(":="))
+        .map(|(name, _)| name.trim().to_string())
+        .filter(|n| !n.is_empty())
+        .collect();
+    Some(UpdateSite { dot: open - 1, assigned })
+}
+
+/// The fields that can still be assigned in `v.(...)`. None when the cursor is
+/// not at a field name in an update.
+fn update_items(st: &State, file: &Arc<FileData>, word_start: usize, offset: usize) -> Option<Vec<CompletionItem>> {
+    let site = update_site(&file.text, word_start, offset)?;
+    let segs = analysis::chain_before(&file.text, site.dot);
+    let val = if segs.is_empty() { Val::Unknown } else { analysis::eval_chain(st, file, word_start, &segs) };
+    let candidates = match &val {
+        // Without a known receiver type, offer the fields of every datatype in scope.
+        Val::Unknown => {
+            let mut files = vec![file.clone()];
+            files.extend(st.scope_files(file));
+            files
+                .iter()
+                .flat_map(|f| all_types(&analysis::top_level(f)))
+                .flat_map(|t| analysis::members_of(st, &t, 3))
+                .collect()
+        }
+        _ => analysis::member_candidates(st, &val),
+    };
+    let mut seen: HashSet<String> = site.assigned.into_iter().collect();
+    Some(
+        candidates
+            .iter()
+            .filter(|m| m.sym().kind == Kind::Destructor && seen.insert(m.sym().name.clone()))
+            .map(|m| symbol_item(m, 0))
+            .collect(),
+    )
 }
 
 fn builtin_members(ty: &str) -> &'static [&'static str] {
@@ -330,6 +458,44 @@ mod tests {
         let line_start = typed.find("    var q").unwrap();
         let got: Vec<String> = complete(&st, &doc, line_start + 4, false).into_iter().map(|i| i.label).collect();
         assert!(got.contains(&"a".to_string()) && got.contains(&"s".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn datatype_update_offers_fields() {
+        let dt = "datatype S = A(x: int, y: bool) | B(x: int, z: seq<int>) { function F(): int { 0 } }\n";
+        let got = labels(&format!("{dt}method M(s: S) {{ var t := s.(<|>); }}"), "<|>");
+        let mut sorted = got.clone();
+        sorted.sort();
+        assert_eq!(sorted, vec!["x", "y", "z"], "{got:?}");
+
+        // fields already assigned on either side are left out
+        let got = labels(&format!("{dt}method M(s: S) {{ var t := s.(x := f(1, 2), <|>, z := []); }}"), "<|>");
+        assert_eq!(got, vec!["y"]);
+
+        // partially typed name, receiver reached through a field chain
+        let src = "datatype P = P(s: S, n: nat)\n".to_string() + dt + "method M(p: P) { var t := p.s.(y<|>); }";
+        let got = labels(&src, "<|>");
+        assert!(got.contains(&"y".to_string()) && !got.contains(&"n".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn datatype_update_value_position_is_general() {
+        let src = "datatype S = A(x: int)\nmethod M(s: S, k: int) { var t := s.(x := <|>); }";
+        let got = labels(src, "<|>");
+        assert!(got.contains(&"k".to_string()) && got.contains(&"assert".to_string()), "{got:?}");
+    }
+
+    #[test]
+    fn update_trigger_ignores_calls() {
+        let st = State::default();
+        let uri = Url::parse("file:///ws/u.dfy").unwrap();
+        let src = "datatype S = A(x: int)\nfunction G(a: int, b: int): int { a }\nmethod M(s: S) { var t := G(1, 2); var u := s.(x := 1); }";
+        st.put_doc(FileData::new(uri.clone(), Some(1), src.to_string(), None, None));
+        let f = st.doc(&uri).unwrap();
+        assert!(update_completion(&st, &f, src.find("G(1").unwrap() + 2).is_none());
+        assert!(update_completion(&st, &f, src.find("1, 2").unwrap() + 2).is_none());
+        let got = update_completion(&st, &f, src.find("s.(").unwrap() + 3).unwrap();
+        assert_eq!(got.iter().map(|i| i.label.as_str()).collect::<Vec<_>>(), vec!["x"]);
     }
 
     #[test]
